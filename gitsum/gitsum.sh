@@ -250,11 +250,20 @@ Do not include any other text, explanations, or YAML formatting - just the summa
     echo "$prompt" > "$prompt_file"
     print_info "Prompt saved to: $prompt_file"
     
-    # Call Claude CLI and get summary content
-    print_info "Getting summary from Claude CLI..."
+    # Call Claude Code CLI and get summary content
+    print_info "Getting summary from Claude Code CLI..."
     local claude_output
-    if ! claude_output=$(echo "$prompt" | claude -p 2>/dev/null); then
-        print_error "Failed to get summary from Claude for block $block_id"
+    local claude_error
+    if ! claude_output=$(echo "$prompt" | claude -p 2>&1); then
+        print_error "Failed to get summary from Claude Code CLI for block $block_id"
+        print_error "Claude Code CLI output: $claude_output"
+        return 1
+    fi
+
+    # Check if the output contains error indicators
+    if echo "$claude_output" | grep -q "Error\|error\|ERROR"; then
+        print_error "Claude Code CLI returned an error for block $block_id"
+        print_error "Claude Code CLI output: $claude_output"
         return 1
     fi
     
