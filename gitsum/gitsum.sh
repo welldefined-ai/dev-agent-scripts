@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Git History Analysis Script using Claude Code CLI
-# Analyzes commit history in configurable blocks and generates evolution summary
+# Git History Summarization Script using Claude Code CLI
+# Summarizes commit history in configurable blocks and generates evolution summary
 
 set -euo pipefail
 
@@ -46,7 +46,7 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Analyze Git commit history in blocks and generate evolution summary using Claude Code CLI.
+Summarize Git commit history in blocks and generate evolution summary using Claude Code CLI.
 
 OPTIONS:
     -i, --interval INTERVAL     Number of commits per analysis block (default: 100)
@@ -56,13 +56,13 @@ OPTIONS:
 
 EXAMPLES:
     $0                         # Use defaults (100 commits per block)
-    $0 -i 50                   # Analyze in blocks of 50 commits
+    $0 -i 50                   # Summarize in blocks of 50 commits
     $0 -i 10 -f my_summary     # Use 10 commits per block, custom base file name
-    $0 --continue              # Resume from existing history analysis
+    $0 --continue              # Resume from existing history summarization
 
 NOTE:
     Files are automatically timestamped (e.g., history_summary_20250122_143022.yml)
-    to ensure each full analysis run has a unique identifier.
+    to ensure each full summarization run has a unique identifier.
 
 REQUIREMENTS:
     - Git repository with commit history
@@ -131,7 +131,7 @@ print_session_info() {
         print_info "Last processed commit: $last_commit"
         print_info "Current block: $start_block"
     else
-        print_info "Starting fresh Git history analysis with timestamp: $TIMESTAMP"
+        print_info "Starting fresh Git history summarization with timestamp: $TIMESTAMP"
         print_info "History file: $HISTORY_FILE"
     fi
 }
@@ -165,7 +165,7 @@ create_initial_history() {
 project_evolution_summary:
   metadata:
     total_commits: $total_commits
-    analysis_method: "${COMMIT_INTERVAL}-commit blocks"
+    summary_method: "${COMMIT_INTERVAL}-commit blocks"
     generated_date: "$current_date"
     last_processed_commit: ""
     current_block: 0
@@ -176,8 +176,8 @@ EOF
     print_success "Created initial history file: $HISTORY_FILE"
 }
 
-# Function to analyze commit block using Claude Code CLI
-analyze_commit_block() {
+# Function to summarize commit block using Claude Code CLI
+summarize_commit_block() {
     local block_id=$1
     local start_index=$2
     local end_index=$3
@@ -191,7 +191,7 @@ analyze_commit_block() {
         return 1
     fi
     
-    print_info "Analyzing block $block_id: commits $start_index-$end_index ($commit_range)"
+    print_info "Summarizing block $block_id: commits $start_index-$end_index ($commit_range)"
     
     # Get commit list for this block
     local commit_list=$(git log --oneline --reverse | sed -n "${start_index},${end_index}p")
@@ -201,10 +201,10 @@ analyze_commit_block() {
     local end_commit=$(echo "$commit_range" | cut -d'.' -f3)
     local code_changes=$(git diff "$start_commit".."$end_commit" --stat 2>/dev/null || echo "No changes detected")
     
-    # Create prompt for Claude - only ask for analysis content, not file operations
-    local prompt="# Git History Analysis Task
+    # Create prompt for Claude - only ask for summary content, not file operations
+    local prompt="# Git History Summarization Task
 
-Analyze this block of commits and provide the content for a YAML history entry.
+Summarize this block of commits and provide the content for a YAML history entry.
 
 ## Commit Block Details
 - **Block ID**: $block_id  
@@ -222,7 +222,7 @@ $commit_list
 $code_changes
 \`\`\`
 
-## Analysis Guidelines
+## Summary Guidelines
 - Focus on major architectural changes and design evolution
 - Identify key functional additions or modifications  
 - Note important refactoring or structural improvements
@@ -243,18 +243,18 @@ KEY_CHANGES:
 Do not include any other text, explanations, or YAML formatting - just the summary and key changes as specified above."
 
     # Call Claude Code CLI with session continuity
-    print_info "Sending analysis request to Claude Code CLI..."
+    print_info "Sending summarization request to Claude Code CLI..."
     
     # Save prompt to temporary file for debugging
     local prompt_file="/tmp/claude_prompt_block_${block_id}.txt"
     echo "$prompt" > "$prompt_file"
     print_info "Prompt saved to: $prompt_file"
     
-    # Call Claude CLI and get analysis content
-    print_info "Getting analysis from Claude CLI..."
+    # Call Claude CLI and get summary content
+    print_info "Getting summary from Claude CLI..."
     local claude_output
     if ! claude_output=$(echo "$prompt" | claude -p 2>/dev/null); then
-        print_error "Failed to get analysis from Claude for block $block_id"
+        print_error "Failed to get summary from Claude for block $block_id"
         return 1
     fi
     
@@ -269,7 +269,7 @@ Do not include any other text, explanations, or YAML formatting - just the summa
         return 1
     fi
     
-    print_info "Analysis received from Claude"
+    print_info "Summary received from Claude"
     
     # Add the new block to the history file using bash
     print_info "Adding block $block_id to history file..."
@@ -308,15 +308,15 @@ Do not include any other text, explanations, or YAML formatting - just the summa
     # Replace original file
     mv "$temp_file" "$HISTORY_FILE"
     
-    print_success "Completed analysis for block $block_id"
+    print_success "Completed summarization for block $block_id"
     return 0
 }
 
-# Main analysis function
-run_analysis() {
+# Main summarization function
+run_summarization() {
     local continue_session=$1
     
-    print_info "Starting Git history analysis with $COMMIT_INTERVAL commits per block"
+    print_info "Starting Git history summarization with $COMMIT_INTERVAL commits per block"
     
     # Initialize session and get starting point
     local session_info=$(initialize_session "$continue_session")
@@ -351,8 +351,8 @@ run_analysis() {
         print_info "Resuming from block $current_block (commit index $start_index)"
     fi
     
-    # Initialize Claude session for this analysis run  
-    print_info "Preparing Claude Code CLI for analysis"
+    # Initialize Claude session for this summarization run  
+    print_info "Preparing Claude Code CLI for summarization"
     print_info "Each block will be processed independently with file context"
     
     # Process blocks
@@ -366,14 +366,14 @@ run_analysis() {
         
         print_info "Processing block $current_block: commits $start_index-$end_index"
         
-        if analyze_commit_block "$current_block" "$start_index" "$end_index" "$total_commits"; then
+        if summarize_commit_block "$current_block" "$start_index" "$end_index" "$total_commits"; then
             print_success "Block $current_block completed successfully"
         else
             print_error "Failed to process block $current_block"
             ((block_errors++))
             
             if [[ $block_errors -ge 3 ]]; then
-                print_error "Too many consecutive errors. Stopping analysis."
+                print_error "Too many consecutive errors. Stopping summarization."
                 break
             fi
             
@@ -387,23 +387,23 @@ run_analysis() {
         sleep 1
     done
     
-    # Check if we actually have a complete analysis by counting blocks in file
+    # Check if we actually have a complete summary by counting blocks in file
     local blocks_in_file=0
     if [[ -f "$HISTORY_FILE" ]]; then
         blocks_in_file=$(grep -c "block_id:" "$HISTORY_FILE" 2>/dev/null || echo "0")
     fi
     
     if [[ $blocks_in_file -gt 0 && $block_errors -eq 0 ]]; then
-        print_success "Git history analysis completed successfully!"
+        print_success "Git history summarization completed successfully!"
         print_success "Results saved to: $HISTORY_FILE"
         print_info "Total blocks processed: $blocks_in_file"
     elif [[ $blocks_in_file -gt 0 ]]; then
         # We have blocks but some errors occurred - check if it's just verification issues
-        print_success "Git history analysis completed with $blocks_in_file blocks processed"
+        print_success "Git history summarization completed with $blocks_in_file blocks processed"
         print_warning "There were $block_errors processing errors, but results may still be complete"
         print_info "Results saved to: $HISTORY_FILE"
     else
-        print_error "Analysis failed - no blocks were successfully processed"
+        print_error "Summarization failed - no blocks were successfully processed"
         print_info "Check $HISTORY_FILE for any partial results"
     fi
 }
@@ -445,7 +445,7 @@ fi
 
 # Main execution
 main() {
-    print_info "Git History Analysis Script"
+    print_info "Git History Summarization Script"
     print_info "============================="
     print_info "Commit interval: $COMMIT_INTERVAL"
     print_info "Base history file: $BASE_HISTORY_FILE"
@@ -453,7 +453,7 @@ main() {
     echo
     
     check_prerequisites
-    run_analysis "$CONTINUE_SESSION"
+    run_summarization "$CONTINUE_SESSION"
 }
 
 # Run main function
