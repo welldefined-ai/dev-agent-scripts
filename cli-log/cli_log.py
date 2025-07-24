@@ -1,17 +1,55 @@
 #!/usr/bin/env python3
 import sys
-import subprocess
 import select
 import os
-import time
 from datetime import datetime
-import threading
 import termios
 import tty
 import pty
 import signal
 import fcntl
 import struct
+import re
+
+def strip_ansi_codes(text):
+    """Remove ANSI escape sequences from text."""
+    # Comprehensive pattern that matches various ANSI escape sequences
+    patterns = [
+        # CSI sequences (most common - colors, cursor movement, etc.)
+        r'\x1B\[[0-?]*[ -/]*[@-~]',
+        # OSC sequences (terminal title, etc.)
+        r'\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)',
+        # Two-character sequences (character sets, etc.)
+        r'\x1B[()][A-Z0-9]',
+        # Single character sequences
+        r'\x1B[>=MNOPVXcmno78]',
+        # DCS, PM, APC sequences
+        r'\x1B[PX^_][^\x1B]*\x1B\\',
+        # RIS (Reset to Initial State)
+        r'\x1Bc',
+    ]
+
+    # Combine all patterns
+    combined_pattern = '|'.join(patterns)
+    ansi_pattern = re.compile(combined_pattern)
+    return ansi_pattern.sub('', text)
+
+def read_and_relay_output(master_fd, log_file):
+    """Read output from master_fd, display to terminal, and log without ANSI codes."""
+    try:
+        data = os.read(master_fd, 1024)
+        if data:
+            # Display original output with ANSI codes to terminal
+            os.write(sys.stdout.fileno(), data)
+            sys.stdout.flush()
+            # Strip ANSI codes when logging output
+            clean_output = strip_ansi_codes(data.decode('utf-8', errors='replace'))
+            log_file.write(f"[OUTPUT] {clean_output}")
+            log_file.flush()
+            return True
+        return False
+    except OSError:
+        return False
 
 def main():
     if len(sys.argv) < 2:
@@ -60,12 +98,13 @@ def main():
             
             # Save original terminal settings
             old_tty = termios.tcgetattr(sys.stdin)
+            child_exit_status = None
             try:
                 # Set stdin to raw mode
                 tty.setraw(sys.stdin.fileno())
                 
                 # Handle window size changes
-                def handle_winch(signum, frame):
+                def handle_winch(_signum, _frame):
                     if sys.stdin.isatty():
                         rows, cols = os.popen('stty size', 'r').read().split()
                         fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
@@ -84,39 +123,23 @@ def main():
                             data = os.read(sys.stdin.fileno(), 1024)
                             if data:
                                 os.write(master_fd, data)
-                                log_file.write(f"[USER INPUT] {data.decode('utf-8', errors='replace')}")
+                                # Strip ANSI codes when logging user input
+                                clean_input = strip_ansi_codes(data.decode('utf-8', errors='replace'))
+                                log_file.write(f"[USER INPUT] {clean_input}")
                                 log_file.flush()
                         
                         if master_fd in r:
                             # Read from subprocess output
-                            try:
-                                data = os.read(master_fd, 1024)
-                                if data:
-                                    os.write(sys.stdout.fileno(), data)
-                                    sys.stdout.flush()
-                                    log_file.write(f"[OUTPUT] {data.decode('utf-8', errors='replace')}")
-                                    log_file.flush()
-                                else:
-                                    break
-                            except OSError:
+                            if not read_and_relay_output(master_fd, log_file):
                                 break
                         
                         # Check if child process has exited
                         pid_result, status = os.waitpid(pid, os.WNOHANG)
                         if pid_result != 0:
                             # Read any remaining output
-                            while True:
-                                try:
-                                    data = os.read(master_fd, 1024)
-                                    if data:
-                                        os.write(sys.stdout.fileno(), data)
-                                        sys.stdout.flush()
-                                        log_file.write(f"[OUTPUT] {data.decode('utf-8', errors='replace')}")
-                                        log_file.flush()
-                                    else:
-                                        break
-                                except OSError:
-                                    break
+                            while read_and_relay_output(master_fd, log_file):
+                                pass
+                            child_exit_status = status
                             break
                             
                     except KeyboardInterrupt:
@@ -130,9 +153,11 @@ def main():
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
                 os.close(master_fd)
                 
-                # Wait for child to exit and get exit code
-                _, status = os.waitpid(pid, 0)
-                exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+                # Wait for child to exit if we haven't already
+                if child_exit_status is None:
+                    _, child_exit_status = os.waitpid(pid, 0)
+                
+                exit_code = os.WEXITSTATUS(child_exit_status) if os.WIFEXITED(child_exit_status) else 1
                 
                 log_file.write(f"\n\nSession ended at: {datetime.now().isoformat()}\n")
                 log_file.write(f"Exit code: {exit_code}\n")
