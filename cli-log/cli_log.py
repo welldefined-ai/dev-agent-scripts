@@ -34,7 +34,7 @@ def strip_ansi_codes(text):
     ansi_pattern = re.compile(combined_pattern)
     return ansi_pattern.sub('', text)
 
-def read_and_relay_output(master_fd, log_file):
+def read_and_relay_output(master_fd, log_file, output_buffer, current_input_line):
     """Read output from master_fd, display to terminal, and log without ANSI codes."""
     try:
         data = os.read(master_fd, 1024)
@@ -44,12 +44,56 @@ def read_and_relay_output(master_fd, log_file):
             sys.stdout.flush()
             # Strip ANSI codes when logging output
             clean_output = strip_ansi_codes(data.decode('utf-8', errors='replace'))
-            log_file.write(f"[OUTPUT] {clean_output}")
-            log_file.flush()
+            output_buffer['data'] += clean_output
+            
+            # Log complete lines, but filter out echo of user input
+            if '\n' in output_buffer['data'] or '\r' in output_buffer['data']:
+                lines = output_buffer['data'].replace('\r', '\n').split('\n')
+                for line in lines[:-1]:  # All complete lines
+                    stripped_line = line.strip()
+                    if stripped_line and not is_echo_of_input(stripped_line, current_input_line['data']):
+                        log_file.write(f"[OUTPUT] {stripped_line}\n")
+                output_buffer['data'] = lines[-1]  # Keep incomplete line in buffer
+                log_file.flush()
             return True
         return False
     except OSError:
         return False
+
+def is_echo_of_input(output_line, current_input):
+    """Check if the output line is likely an echo of user input."""
+    # Check for multiple prompts in one line (character-by-character echo)
+    prompt_count = output_line.count('>>>')
+    if prompt_count > 1:
+        return True
+    
+    # Check for incremental typing patterns like ">>> p>>> pr>>> pri"
+    if '>>>' in output_line:
+        # Extract everything after the last prompt
+        last_prompt_idx = output_line.rfind('>>>')
+        if last_prompt_idx != -1:
+            after_prompt = output_line[last_prompt_idx + 3:].strip()
+            # If it's a short fragment and contains incremental text, it's likely echo
+            if len(after_prompt) < 100 and ('>>>' in output_line[:last_prompt_idx]):
+                return True
+    
+    # Check for shell prompts with similar patterns
+    for prompt in ['$ ', '# ', '> ']:
+        if prompt in output_line and output_line.count(prompt) > 1:
+            return True
+    
+    # Check if it's just echoing what the user is typing
+    cleaned_output = output_line
+    for prompt in ['>>> ', '... ', '$ ', '# ', '> ']:
+        cleaned_output = cleaned_output.replace(prompt, ' ')
+    
+    if current_input and len(current_input.strip()) > 0:
+        # Check if the cleaned output contains partial matches of current input
+        clean_input = current_input.strip()
+        if clean_input in cleaned_output or cleaned_output.strip() in clean_input:
+            return True
+    
+    return False
 
 def main():
     if len(sys.argv) < 2:
@@ -97,11 +141,17 @@ def main():
             os.close(slave_fd)
             
             # Save original terminal settings
-            old_tty = termios.tcgetattr(sys.stdin)
+            old_tty = None
+            if sys.stdin.isatty():
+                old_tty = termios.tcgetattr(sys.stdin)
             child_exit_status = None
+            input_buffer = ""
+            output_buffer = {"data": ""}
+            current_input_line = {"data": ""}
             try:
-                # Set stdin to raw mode
-                tty.setraw(sys.stdin.fileno())
+                # Set stdin to raw mode if it's a tty
+                if sys.stdin.isatty():
+                    tty.setraw(sys.stdin.fileno())
                 
                 # Handle window size changes
                 def handle_winch(_signum, _frame):
@@ -123,21 +173,32 @@ def main():
                             data = os.read(sys.stdin.fileno(), 1024)
                             if data:
                                 os.write(master_fd, data)
-                                # Strip ANSI codes when logging user input
-                                clean_input = strip_ansi_codes(data.decode('utf-8', errors='replace'))
-                                log_file.write(f"[USER INPUT] {clean_input}")
-                                log_file.flush()
+                                # Buffer input and log complete lines
+                                decoded_data = data.decode('utf-8', errors='replace')
+                                clean_input = strip_ansi_codes(decoded_data)
+                                input_buffer += clean_input
+                                current_input_line['data'] += clean_input
+                                
+                                # Log complete lines (when Enter is pressed)
+                                if '\n' in input_buffer or '\r' in input_buffer:
+                                    lines = input_buffer.replace('\r', '\n').split('\n')
+                                    for line in lines[:-1]:  # All complete lines
+                                        if line.strip():  # Only log non-empty lines
+                                            log_file.write(f"[USER INPUT] {line}\n")
+                                    input_buffer = lines[-1]  # Keep incomplete line in buffer
+                                    current_input_line['data'] = input_buffer  # Reset current line tracker
+                                    log_file.flush()
                         
                         if master_fd in r:
                             # Read from subprocess output
-                            if not read_and_relay_output(master_fd, log_file):
+                            if not read_and_relay_output(master_fd, log_file, output_buffer, current_input_line):
                                 break
                         
                         # Check if child process has exited
                         pid_result, status = os.waitpid(pid, os.WNOHANG)
                         if pid_result != 0:
                             # Read any remaining output
-                            while read_and_relay_output(master_fd, log_file):
+                            while read_and_relay_output(master_fd, log_file, output_buffer, current_input_line):
                                 pass
                             child_exit_status = status
                             break
@@ -150,7 +211,8 @@ def main():
                 
             finally:
                 # Restore terminal settings
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
+                if old_tty is not None:
+                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
                 os.close(master_fd)
                 
                 # Wait for child to exit if we haven't already
@@ -158,6 +220,12 @@ def main():
                     _, child_exit_status = os.waitpid(pid, 0)
                 
                 exit_code = os.WEXITSTATUS(child_exit_status) if os.WIFEXITED(child_exit_status) else 1
+                
+                # Flush any remaining buffered data
+                if input_buffer.strip():
+                    log_file.write(f"[USER INPUT] {input_buffer}\n")
+                if output_buffer["data"].strip():
+                    log_file.write(f"[OUTPUT] {output_buffer['data']}\n")
                 
                 log_file.write(f"\n\nSession ended at: {datetime.now().isoformat()}\n")
                 log_file.write(f"Exit code: {exit_code}\n")
