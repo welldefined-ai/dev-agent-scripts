@@ -18,6 +18,7 @@ Instead of getting lost in individual commit messages, gitsum provides a bird's-
 - **Configurable Block Size**: Process commits in blocks of any size (default: 100)
 - **Resume Support**: Continue interrupted summarization from where you left off
 - **Timestamped Output**: Each summarization run gets a unique timestamp to avoid conflicts
+- **Date Range Tracking**: Records the time span of commits in each block for temporal context
 - **YAML Output**: Structured, readable format for further processing or documentation
 
 ## Prerequisites
@@ -91,6 +92,7 @@ project_evolution_summary:
   evolution_blocks:
     - block_id: 1
       commit_range: "def456..abc123"
+      date_range: "2023-01-15 to 2023-02-28"
       commits: "1-100"
       summary: "Initial project setup with basic React components and routing infrastructure."
       key_changes:
