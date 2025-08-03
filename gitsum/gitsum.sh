@@ -31,13 +31,27 @@ print_error() {
 get_timestamp() {
     local timestamp_file=".git_history_timestamp"
     local continue_session=$1
+    local interval=$2
 
     if [[ "$continue_session" == "true" && -f "$timestamp_file" ]]; then
-        cat "$timestamp_file"
+        # Read timestamp and interval from file
+        head -1 "$timestamp_file"
     else
         local ts=$(date +"%Y%m%d_%H%M%S")
+        # Store both timestamp and interval
         echo "$ts" > "$timestamp_file"
+        echo "$interval" >> "$timestamp_file"
         echo "$ts"
+    fi
+}
+
+# Function to get stored interval from timestamp file
+get_stored_interval() {
+    local timestamp_file=".git_history_timestamp"
+    if [[ -f "$timestamp_file" ]] && [[ $(wc -l < "$timestamp_file") -ge 2 ]]; then
+        sed -n '2p' "$timestamp_file"
+    else
+        echo ""
     fi
 }
 
@@ -100,7 +114,7 @@ initialize_session() {
     local continue_session=$1
 
     # Get timestamp and set file/session names - output them so they can be captured
-    local timestamp=$(get_timestamp "$continue_session")
+    local timestamp=$(get_timestamp "$continue_session" "$COMMIT_INTERVAL")
     local history_file="${BASE_HISTORY_FILE}_${timestamp}.yml"
 
     if [[ "$continue_session" == "true" ]]; then
@@ -483,6 +497,19 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Handle --continue mode: check for stored interval if not provided
+if [[ "$CONTINUE_SESSION" == "true" ]]; then
+    stored_interval=$(get_stored_interval)
+    if [[ -n "$stored_interval" ]] && [[ "$COMMIT_INTERVAL" == "100" ]]; then
+        # Use stored interval if user didn't specify one (still at default)
+        COMMIT_INTERVAL="$stored_interval"
+        print_info "Using stored interval from previous run: $COMMIT_INTERVAL"
+    elif [[ -n "$stored_interval" ]] && [[ "$COMMIT_INTERVAL" != "$stored_interval" ]]; then
+        print_warning "Specified interval ($COMMIT_INTERVAL) differs from stored interval ($stored_interval)"
+        print_warning "Using specified interval: $COMMIT_INTERVAL"
+    fi
+fi
 
 # Validate commit interval
 if ! [[ "$COMMIT_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$COMMIT_INTERVAL" -le 0 ]]; then
