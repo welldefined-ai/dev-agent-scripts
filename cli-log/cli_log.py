@@ -21,6 +21,8 @@ def strip_ansi_codes(text):
         r'\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)',
         # Two-character sequences (character sets, etc.)
         r'\x1B[()][A-Z0-9]',
+        # SS3 sequences (function keys like F1-F4: ESC O P, ESC O Q, etc.)
+        r'\x1BO[A-Z0-9]',
         # Single character sequences
         r'\x1B[>=MNOPVXcmno78]',
         # DCS, PM, APC sequences
@@ -33,6 +35,58 @@ def strip_ansi_codes(text):
     combined_pattern = '|'.join(patterns)
     ansi_pattern = re.compile(combined_pattern)
     return ansi_pattern.sub('', text)
+
+def clean_user_input(text, input_context):
+    """Clean user input by removing control characters and navigation keys."""
+    # First strip ANSI codes
+    cleaned = strip_ansi_codes(text)
+    
+    # Remove common control characters that shouldn't be logged
+    control_chars_to_remove = [
+        '\x7f',     # DEL (backspace)
+        '\x08',     # BS (backspace)
+        '\x1b',     # ESC (escape sequences start)
+        '\x00',     # NUL
+        '\x01',     # SOH
+        '\x02',     # STX
+        '\x03',     # ETX (Ctrl+C, but we handle this elsewhere)
+        '\x04',     # EOT (Ctrl+D)
+        '\x05',     # ENQ
+        '\x06',     # ACK
+        '\x07',     # BEL
+        '\x0b',     # VT
+        '\x0c',     # FF
+        '\x0e',     # SO
+        '\x0f',     # SI
+        '\x10',     # DLE
+        '\x11',     # DC1
+        '\x12',     # DC2
+        '\x13',     # DC3
+        '\x14',     # DC4
+        '\x15',     # NAK
+        '\x16',     # SYN
+        '\x17',     # ETB
+        '\x18',     # CAN
+        '\x19',     # EM
+        '\x1a',     # SUB
+        '\x1c',     # FS
+        '\x1d',     # GS
+        '\x1e',     # RS
+        '\x1f',     # US
+    ]
+    
+    for char in control_chars_to_remove:
+        cleaned = cleaned.replace(char, '')
+    
+    # ANSI stripping should handle all escape sequences
+    # No need for additional navigation pattern removal since proper sequences
+    # like \x1b[A are already handled by strip_ansi_codes()
+    
+    # With proper escape sequence handling, we shouldn't need aggressive ABCD filtering
+    # The ANSI stripping should handle all legitimate arrow keys: \x1b[A, \x1b[B, etc.
+    # Any remaining A, B, C, D characters are likely legitimate user input
+    
+    return cleaned
 
 def read_and_relay_output(master_fd, log_file, output_buffer, current_input_line):
     """Read output from master_fd, display to terminal, and log without ANSI codes."""
@@ -148,6 +202,7 @@ def main():
             input_buffer = ""
             output_buffer = {"data": ""}
             current_input_line = {"data": ""}
+            raw_input_buffer = ""  # Buffer for handling fragmented escape sequences
             try:
                 # Set stdin to raw mode if it's a tty
                 if sys.stdin.isatty():
@@ -173,14 +228,48 @@ def main():
                             data = os.read(sys.stdin.fileno(), 1024)
                             if data:
                                 os.write(master_fd, data)
-                                # Buffer input and log complete lines
+                                # Buffer raw input to handle fragmented escape sequences
                                 decoded_data = data.decode('utf-8', errors='replace')
-                                clean_input = strip_ansi_codes(decoded_data)
-                                input_buffer += clean_input
-                                current_input_line['data'] += clean_input
+                                raw_input_buffer += decoded_data
                                 
-                                # Log complete lines (when Enter is pressed)
-                                if '\n' in input_buffer or '\r' in input_buffer:
+                                # Check if we have incomplete escape sequences to preserve
+                                def is_incomplete_sequence(text):
+                                    # Just ESC at end
+                                    if text.endswith('\x1b'):
+                                        return True
+                                    # CSI sequences: ESC [ followed by digits/semicolons but no final char
+                                    if re.search(r'\x1b\[[0-9;]*$', text):
+                                        return True
+                                    # SS3 sequences: ESC O (but not complete like ESC O A)
+                                    if re.search(r'\x1bO$', text):
+                                        return True
+                                    # OSC sequences: ESC ] but no terminator
+                                    if re.search(r'\x1b\][^\x07\x1b]*$', text) and not text.endswith('\x07'):
+                                        return True
+                                    return False
+                                
+                                if is_incomplete_sequence(raw_input_buffer):
+                                    # Add safety: don't buffer forever
+                                    if len(raw_input_buffer) < 50:  # Reasonable limit
+                                        continue
+                                    # If buffer too long, probably not an escape sequence
+                                
+                                # Process complete sequences from the buffer
+                                processed_input = strip_ansi_codes(raw_input_buffer)
+                                clean_input = clean_user_input(processed_input, input_buffer)
+                                
+                                # Only add to buffer if it's not filtered out
+                                if clean_input:
+                                    input_buffer += clean_input
+                                    current_input_line['data'] += clean_input
+                                
+                                # Clear the raw buffer after processing
+                                raw_input_buffer = ""
+                                
+                                # Check for line completion (Enter pressed)
+                                if '\n' in decoded_data or '\r' in decoded_data:
+                                    # When Enter is pressed, we want to capture what was actually on the line
+                                    # This handles cases where history navigation populated the command
                                     lines = input_buffer.replace('\r', '\n').split('\n')
                                     for line in lines[:-1]:  # All complete lines
                                         if line.strip():  # Only log non-empty lines
