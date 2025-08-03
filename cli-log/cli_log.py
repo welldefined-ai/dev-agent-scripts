@@ -11,17 +11,17 @@ import fcntl
 import struct
 import re
 
-def strip_ansi_codes(text):
-    """Remove ANSI escape sequences from text."""
-    # Comprehensive pattern that matches various ANSI escape sequences
+def strip_ansi_codes_for_output(text):
+    """Remove ANSI escape sequences from OUTPUT text for clean logging."""
+    # For output, we want to remove colors and formatting but keep the text content
     patterns = [
-        # CSI sequences (most common - colors, cursor movement, etc.)
+        # CSI sequences (colors, cursor movement, etc.)
         r'\x1B\[[0-?]*[ -/]*[@-~]',
         # OSC sequences (terminal title, etc.)
         r'\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)',
         # Two-character sequences (character sets, etc.)
         r'\x1B[()][A-Z0-9]',
-        # SS3 sequences (function keys like F1-F4: ESC O P, ESC O Q, etc.)
+        # SS3 sequences (function keys)
         r'\x1BO[A-Z0-9]',
         # Single character sequences
         r'\x1B[>=MNOPVXcmno78]',
@@ -31,62 +31,67 @@ def strip_ansi_codes(text):
         r'\x1Bc',
     ]
 
-    # Combine all patterns
     combined_pattern = '|'.join(patterns)
     ansi_pattern = re.compile(combined_pattern)
     return ansi_pattern.sub('', text)
 
-def clean_user_input(text, input_context):
-    """Clean user input by removing control characters and navigation keys."""
-    # First strip ANSI codes
-    cleaned = strip_ansi_codes(text)
+def format_input_for_logging(text):
+    """Format user input for logging, preserving navigation keys but making them readable."""
+    # Convert escape sequences to readable format for logging
+    formatted = text
     
-    # Remove common control characters that shouldn't be logged
+    # Replace common escape sequences with readable names
+    replacements = [
+        # CSI format arrows (ESC [ X)
+        ('\x1b[A', '[UP]'),
+        ('\x1b[B', '[DOWN]'),
+        ('\x1b[C', '[RIGHT]'),
+        ('\x1b[D', '[LEFT]'),
+        # SS3 format arrows (ESC O X) - common in application mode
+        ('\x1bOA', '[UP]'),
+        ('\x1bOB', '[DOWN]'),
+        ('\x1bOC', '[RIGHT]'),
+        ('\x1bOD', '[LEFT]'),
+        # Navigation keys
+        ('\x1b[H', '[HOME]'),
+        ('\x1b[F', '[END]'),
+        ('\x1bOH', '[HOME]'),     # Alternative SS3 format
+        ('\x1bOF', '[END]'),      # Alternative SS3 format
+        ('\x1b[3~', '[DELETE]'),
+        ('\x1b[2~', '[INSERT]'),
+        ('\x1b[5~', '[PAGE_UP]'),
+        ('\x1b[6~', '[PAGE_DOWN]'),
+        # Function keys (SS3 format)
+        ('\x1bOP', '[F1]'),
+        ('\x1bOQ', '[F2]'),
+        ('\x1bOR', '[F3]'),
+        ('\x1bOS', '[F4]'),
+        # Editing keys
+        ('\x7f', '[BACKSPACE]'),
+        ('\x08', '[BACKSPACE]'),
+        ('\x1b', '[ESC]'),
+    ]
+    
+    for escape_seq, readable in replacements:
+        formatted = formatted.replace(escape_seq, readable)
+    
+    # Remove other control characters that aren't useful for logging
     control_chars_to_remove = [
-        '\x7f',     # DEL (backspace)
-        '\x08',     # BS (backspace)
-        '\x1b',     # ESC (escape sequences start)
-        '\x00',     # NUL
-        '\x01',     # SOH
-        '\x02',     # STX
-        '\x03',     # ETX (Ctrl+C, but we handle this elsewhere)
-        '\x04',     # EOT (Ctrl+D)
-        '\x05',     # ENQ
-        '\x06',     # ACK
-        '\x07',     # BEL
-        '\x0b',     # VT
-        '\x0c',     # FF
-        '\x0e',     # SO
-        '\x0f',     # SI
-        '\x10',     # DLE
-        '\x11',     # DC1
-        '\x12',     # DC2
-        '\x13',     # DC3
-        '\x14',     # DC4
-        '\x15',     # NAK
-        '\x16',     # SYN
-        '\x17',     # ETB
-        '\x18',     # CAN
-        '\x19',     # EM
-        '\x1a',     # SUB
-        '\x1c',     # FS
-        '\x1d',     # GS
-        '\x1e',     # RS
-        '\x1f',     # US
+        '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07',
+        '\x0b', '\x0c', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13',
+        '\x14', '\x15', '\x16', '\x17', '\x18', '\x19', '\x1a', '\x1c',
+        '\x1d', '\x1e', '\x1f'
     ]
     
     for char in control_chars_to_remove:
-        cleaned = cleaned.replace(char, '')
+        formatted = formatted.replace(char, '')
     
-    # ANSI stripping should handle all escape sequences
-    # No need for additional navigation pattern removal since proper sequences
-    # like \x1b[A are already handled by strip_ansi_codes()
-    
-    # With proper escape sequence handling, we shouldn't need aggressive ABCD filtering
-    # The ANSI stripping should handle all legitimate arrow keys: \x1b[A, \x1b[B, etc.
-    # Any remaining A, B, C, D characters are likely legitimate user input
-    
-    return cleaned
+    return formatted
+
+def clean_user_input(text, input_context):
+    """Format user input for logging, preserving navigation operations."""
+    # Use the new formatting function that preserves but formats navigation keys
+    return format_input_for_logging(text)
 
 def read_and_relay_output(master_fd, log_file, output_buffer, current_input_line):
     """Read output from master_fd, display to terminal, and log without ANSI codes."""
@@ -97,7 +102,7 @@ def read_and_relay_output(master_fd, log_file, output_buffer, current_input_line
             os.write(sys.stdout.fileno(), data)
             sys.stdout.flush()
             # Strip ANSI codes when logging output
-            clean_output = strip_ansi_codes(data.decode('utf-8', errors='replace'))
+            clean_output = strip_ansi_codes_for_output(data.decode('utf-8', errors='replace'))
             output_buffer['data'] += clean_output
             
             # Log complete lines, but filter out echo of user input
@@ -113,6 +118,7 @@ def read_and_relay_output(master_fd, log_file, output_buffer, current_input_line
         return False
     except OSError:
         return False
+
 
 def is_echo_of_input(output_line, current_input):
     """Check if the output line is likely an echo of user input."""
@@ -228,43 +234,14 @@ def main():
                             data = os.read(sys.stdin.fileno(), 1024)
                             if data:
                                 os.write(master_fd, data)
-                                # Buffer raw input to handle fragmented escape sequences
+                                # Process input for logging (preserves navigation keys as readable text)
                                 decoded_data = data.decode('utf-8', errors='replace')
-                                raw_input_buffer += decoded_data
+                                formatted_input = clean_user_input(decoded_data, input_buffer)
                                 
-                                # Check if we have incomplete escape sequences to preserve
-                                def is_incomplete_sequence(text):
-                                    # Just ESC at end
-                                    if text.endswith('\x1b'):
-                                        return True
-                                    # CSI sequences: ESC [ followed by digits/semicolons but no final char
-                                    if re.search(r'\x1b\[[0-9;]*$', text):
-                                        return True
-                                    # SS3 sequences: ESC O (but not complete like ESC O A)
-                                    if re.search(r'\x1bO$', text):
-                                        return True
-                                    # OSC sequences: ESC ] but no terminator
-                                    if re.search(r'\x1b\][^\x07\x1b]*$', text) and not text.endswith('\x07'):
-                                        return True
-                                    return False
-                                
-                                if is_incomplete_sequence(raw_input_buffer):
-                                    # Add safety: don't buffer forever
-                                    if len(raw_input_buffer) < 50:  # Reasonable limit
-                                        continue
-                                    # If buffer too long, probably not an escape sequence
-                                
-                                # Process complete sequences from the buffer
-                                processed_input = strip_ansi_codes(raw_input_buffer)
-                                clean_input = clean_user_input(processed_input, input_buffer)
-                                
-                                # Only add to buffer if it's not filtered out
-                                if clean_input:
-                                    input_buffer += clean_input
-                                    current_input_line['data'] += clean_input
-                                
-                                # Clear the raw buffer after processing
-                                raw_input_buffer = ""
+                                # Add to buffer if there's content
+                                if formatted_input:
+                                    input_buffer += formatted_input
+                                    current_input_line['data'] += formatted_input
                                 
                                 # Check for line completion (Enter pressed)
                                 if '\n' in decoded_data or '\r' in decoded_data:
