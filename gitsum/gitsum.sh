@@ -31,7 +31,7 @@ print_error() {
 get_timestamp() {
     local timestamp_file=".git_history_timestamp"
     local continue_session=$1
-    
+
     if [[ "$continue_session" == "true" && -f "$timestamp_file" ]]; then
         cat "$timestamp_file"
     else
@@ -75,13 +75,13 @@ EOF
 # Function to check prerequisites
 check_prerequisites() {
     print_info "Checking prerequisites..."
-    
+
     # Check if we're in a git repository
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         print_error "Not in a Git repository. Please run this script from within a Git repository."
         exit 1
     fi
-    
+
     # Check if claude CLI is available
     if ! command -v claude &> /dev/null; then
         print_error "Claude Code CLI not found. Please install it first:"
@@ -89,20 +89,20 @@ check_prerequisites() {
         print_error "Or visit: https://docs.anthropic.com/en/docs/claude-code/quickstart"
         exit 1
     fi
-    
+
     # Note: Authentication will be checked naturally when Claude is first called
-    
+
     print_success "Prerequisites check passed"
 }
 
 # Function to initialize or continue session  
 initialize_session() {
     local continue_session=$1
-    
+
     # Get timestamp and set file/session names - output them so they can be captured
     local timestamp=$(get_timestamp "$continue_session")
     local history_file="${BASE_HISTORY_FILE}_${timestamp}.yml"
-    
+
     if [[ "$continue_session" == "true" ]]; then
         if [[ -f "$history_file" ]]; then
             # Extract last processed commit and current block from existing file
@@ -115,7 +115,7 @@ initialize_session() {
             fi
         fi
     fi
-    
+
     # Start fresh analysis - output format: timestamp:history_file:FRESH:0
     echo "$timestamp:$history_file:FRESH:0"
 }
@@ -125,7 +125,7 @@ print_session_info() {
     local continue_session=$1
     local last_commit=$2
     local start_block=$3
-    
+
     if [[ "$continue_session" == "true" && "$last_commit" != "FRESH" ]]; then
         print_info "Continuing from existing history file: $HISTORY_FILE"
         print_info "Last processed commit: $last_commit"
@@ -145,12 +145,34 @@ get_total_commits() {
 get_commit_range() {
     local start_index=$1
     local end_index=$2
-    
+
     local start_commit=$(git log --oneline --reverse | sed -n "${start_index}p" | cut -d' ' -f1)
     local end_commit=$(git log --oneline --reverse | sed -n "${end_index}p" | cut -d' ' -f1)
-    
+
     if [[ -n "$start_commit" && -n "$end_commit" ]]; then
         echo "$start_commit..$end_commit"
+    else
+        echo ""
+    fi
+}
+
+# Function to get commit date range
+get_commit_date_range() {
+    local start_index=$1
+    local end_index=$2
+
+    local start_commit=$(git log --oneline --reverse | sed -n "${start_index}p" | cut -d' ' -f1)
+    local end_commit=$(git log --oneline --reverse | sed -n "${end_index}p" | cut -d' ' -f1)
+
+    if [[ -n "$start_commit" && -n "$end_commit" ]]; then
+        local start_date=$(git show -s --format=%ci "$start_commit" 2>/dev/null | cut -d' ' -f1)
+        local end_date=$(git show -s --format=%ci "$end_commit" 2>/dev/null | cut -d' ' -f1)
+
+        if [[ -n "$start_date" && -n "$end_date" ]]; then
+            echo "$start_date to $end_date"
+        else
+            echo "unknown date range"
+        fi
     else
         echo ""
     fi
@@ -160,7 +182,7 @@ get_commit_range() {
 create_initial_history() {
     local total_commits=$1
     local current_date=$(date +"%Y-%m-%d")
-    
+
     cat > "$HISTORY_FILE" << EOF
 project_evolution_summary:
   metadata:
@@ -172,7 +194,7 @@ project_evolution_summary:
 
   evolution_blocks:
 EOF
-    
+
     print_success "Created initial history file: $HISTORY_FILE"
 }
 
@@ -182,25 +204,27 @@ summarize_commit_block() {
     local start_index=$2
     local end_index=$3
     local total_commits=$4
-    
+
     local commit_range=$(get_commit_range $start_index $end_index)
-    
+    local date_range=$(get_commit_date_range $start_index $end_index)
+
     if [[ -z "$commit_range" ]]; then
         print_error "No commits found in range $start_index-$end_index - this may indicate git log parsing failed"
         print_error "Total commits: $total_commits, Start: $start_index, End: $end_index"
         return 1
     fi
-    
+
     print_info "Summarizing block $block_id: commits $start_index-$end_index ($commit_range)"
-    
+    print_info "Date range: $date_range"
+
     # Get commit list for this block
     local commit_list=$(git log --oneline --reverse | sed -n "${start_index},${end_index}p")
-    
+
     # Get code changes summary
     local start_commit=$(echo "$commit_range" | cut -d'.' -f1)
     local end_commit=$(echo "$commit_range" | cut -d'.' -f3)
     local code_changes=$(git diff "$start_commit".."$end_commit" --stat 2>/dev/null || echo "No changes detected")
-    
+
     # Create prompt for Claude - only ask for summary content, not file operations
     local prompt="# Git History Summarization Task
 
@@ -209,6 +233,7 @@ Summarize this block of commits and provide the content for a YAML history entry
 ## Commit Block Details
 - **Block ID**: $block_id  
 - **Commit Range**: $commit_range
+- **Date Range**: $date_range
 - **Position**: Commits ${start_index}-${end_index} of $total_commits total
 - **End Commit Hash**: $end_commit
 
@@ -244,12 +269,12 @@ Do not include any other text, explanations, or YAML formatting - just the summa
 
     # Call Claude Code CLI with session continuity
     print_info "Sending summarization request to Claude Code CLI..."
-    
+
     # Save prompt to temporary file for debugging
     local prompt_file="/tmp/claude_prompt_block_${block_id}.txt"
     echo "$prompt" > "$prompt_file"
     print_info "Prompt saved to: $prompt_file"
-    
+
     # Call Claude Code CLI and get summary content
     print_info "Getting summary from Claude Code CLI..."
     local claude_output
@@ -260,35 +285,37 @@ Do not include any other text, explanations, or YAML formatting - just the summa
         return 1
     fi
 
-    # Check if the output contains error indicators
-    if echo "$claude_output" | grep -q "Error\|error\|ERROR"; then
+    # Check if the output contains error indicators (but not in the commit messages)
+    # Only check for standalone error messages, not as part of commit text
+    if echo "$claude_output" | grep -qE "^(Error|ERROR:|Failed|FAILED)" || echo "$claude_output" | grep -q "command not found"; then
         print_error "Claude Code CLI returned an error for block $block_id"
         print_error "Claude Code CLI output: $claude_output"
         return 1
     fi
-    
+
     # Parse Claude's response to extract summary and key changes
     local summary=$(echo "$claude_output" | grep "SUMMARY:" | sed 's/SUMMARY: //')
     local key_changes_section=$(echo "$claude_output" | sed -n '/KEY_CHANGES:/,/^$/p' | tail -n +2)
-    
+
     # Validate that we got content
     if [[ -z "$summary" ]]; then
         print_error "Failed to extract summary from Claude response for block $block_id"
         print_error "Claude output: $claude_output"
         return 1
     fi
-    
+
     print_info "Summary received from Claude"
-    
+
     # Add the new block to the history file using bash
     print_info "Adding block $block_id to history file..."
-    
+
     # Create the YAML block entry
     local yaml_block="  - block_id: $block_id
     commit_range: \"$commit_range\"
+    date_range: \"$date_range\"
     commits: \"${start_index}-${end_index}\"
     summary: \"$summary\""
-    
+
     # Add key changes if we have them
     if [[ -n "$key_changes_section" ]]; then
         yaml_block="$yaml_block
@@ -300,23 +327,23 @@ Do not include any other text, explanations, or YAML formatting - just the summa
             fi
         done <<< "$key_changes_section"
     fi
-    
+
     # Append the block to the evolution_blocks section
     echo "$yaml_block" >> "$HISTORY_FILE"
-    
+
     # Update the metadata in the file
     print_info "Updating metadata in history file..."
-    
+
     # Create temporary file for atomic update
     local temp_file="${HISTORY_FILE}.tmp"
-    
+
     # Update last_processed_commit and current_block in metadata
     sed "s/last_processed_commit: .*/last_processed_commit: \"$end_commit\"/" "$HISTORY_FILE" | \
     sed "s/current_block: .*/current_block: $block_id/" > "$temp_file"
-    
+
     # Replace original file
     mv "$temp_file" "$HISTORY_FILE"
-    
+
     print_success "Completed summarization for block $block_id"
     return 0
 }
@@ -324,29 +351,29 @@ Do not include any other text, explanations, or YAML formatting - just the summa
 # Main summarization function
 run_summarization() {
     local continue_session=$1
-    
+
     print_info "Starting Git history summarization with $COMMIT_INTERVAL commits per block"
-    
+
     # Initialize session and get starting point
     local session_info=$(initialize_session "$continue_session")
     TIMESTAMP=$(echo "$session_info" | cut -d':' -f1)
     HISTORY_FILE=$(echo "$session_info" | cut -d':' -f2)
     local last_commit=$(echo "$session_info" | cut -d':' -f3)
     local start_block=$(echo "$session_info" | cut -d':' -f4)
-    
+
     # Ensure start_block is numeric (default to 0 if not)
     if ! [[ "$start_block" =~ ^[0-9]+$ ]]; then
         print_warning "Non-numeric start block value detected, defaulting to 0"
         start_block=0
     fi
-    
+
     # Print session information
     print_session_info "$continue_session" "$last_commit" "$start_block"
-    
+
     # Get total commits
     local total_commits=$(get_total_commits)
     print_info "Repository has $total_commits total commits"
-    
+
     # Create or verify history file
     if [[ "$last_commit" == "FRESH" ]]; then
         create_initial_history "$total_commits"
@@ -359,49 +386,49 @@ run_summarization() {
         local current_block=$((start_block + 1))
         print_info "Resuming from block $current_block (commit index $start_index)"
     fi
-    
+
     # Initialize Claude session for this summarization run  
     print_info "Preparing Claude Code CLI for summarization"
     print_info "Each block will be processed independently with file context"
-    
+
     # Process blocks
     local block_errors=0
-    
+
     while [[ $start_index -le $total_commits ]]; do
         local end_index=$((start_index + COMMIT_INTERVAL - 1))
         if [[ $end_index -gt $total_commits ]]; then
             end_index=$total_commits
         fi
-        
+
         print_info "Processing block $current_block: commits $start_index-$end_index"
-        
+
         if summarize_commit_block "$current_block" "$start_index" "$end_index" "$total_commits"; then
             print_success "Block $current_block completed successfully"
         else
             print_error "Failed to process block $current_block"
             ((block_errors++))
-            
+
             if [[ $block_errors -ge 3 ]]; then
                 print_error "Too many consecutive errors. Stopping summarization."
                 break
             fi
-            
+
             print_warning "Continuing with next block..."
         fi
-        
+
         start_index=$((end_index + 1))
         ((current_block++))
-        
+
         # Small delay to avoid overwhelming the API
         sleep 1
     done
-    
+
     # Check if we actually have a complete summary by counting blocks in file
     local blocks_in_file=0
     if [[ -f "$HISTORY_FILE" ]]; then
         blocks_in_file=$(grep -c "block_id:" "$HISTORY_FILE" 2>/dev/null || echo "0")
     fi
-    
+
     if [[ $blocks_in_file -gt 0 && $block_errors -eq 0 ]]; then
         print_success "Git history summarization completed successfully!"
         print_success "Results saved to: $HISTORY_FILE"
@@ -460,7 +487,7 @@ main() {
     print_info "Base history file: $BASE_HISTORY_FILE"
     print_info "Continue mode: $CONTINUE_SESSION"
     echo
-    
+
     check_prerequisites
     run_summarization "$CONTINUE_SESSION"
 }
