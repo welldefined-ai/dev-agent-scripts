@@ -429,18 +429,29 @@ run_summarization() {
         blocks_in_file=$(grep -c "block_id:" "$HISTORY_FILE" 2>/dev/null || echo "0")
     fi
 
-    if [[ $blocks_in_file -gt 0 && $block_errors -eq 0 ]]; then
+    # Check if we've processed all commits
+    local expected_blocks=$(( (total_commits + COMMIT_INTERVAL - 1) / COMMIT_INTERVAL ))
+    local is_complete=$([[ $blocks_in_file -eq $expected_blocks ]] && echo "true" || echo "false")
+
+    if [[ $blocks_in_file -gt 0 && $block_errors -eq 0 && "$is_complete" == "true" ]]; then
         print_success "Git history summarization completed successfully!"
         print_success "Results saved to: $HISTORY_FILE"
         print_info "Total blocks processed: $blocks_in_file"
+        # Remove timestamp file on successful completion
+        rm -f ".git_history_timestamp"
+        print_info "Cleaned up temporary timestamp file"
     elif [[ $blocks_in_file -gt 0 ]]; then
         # We have blocks but some errors occurred - check if it's just verification issues
         print_success "Git history summarization completed with $blocks_in_file blocks processed"
         print_warning "There were $block_errors processing errors, but results may still be complete"
         print_info "Results saved to: $HISTORY_FILE"
+        # Keep timestamp file for potential resume
+        print_info "Timestamp file preserved for potential resume with --continue"
     else
         print_error "Summarization failed - no blocks were successfully processed"
         print_info "Check $HISTORY_FILE for any partial results"
+        # Keep timestamp file for potential resume
+        print_info "Timestamp file preserved for potential resume with --continue"
     fi
 }
 
